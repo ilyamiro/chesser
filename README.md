@@ -25,6 +25,44 @@ pip install .
 cargo install --path native   # chesser-indexer, chesser-play
 ```
 
+## Real games: download and index
+
+`--games` needs an index of real positions. Build it once, before the first `convert --games`.
+
+1. Pick where the data goes (a month of games takes ~100 GB; use a big disk):
+
+   ```sh
+   export CHESSER_DATA=/path/to/big/disk/chesser-data   # default: ./data
+   ```
+
+2. See what exists and what fits:
+
+   ```sh
+   chesser download --list                 # months, download sizes, index sizes
+   ```
+
+3. Download and index (resumable, SHA-256 checked, indexed right after):
+
+   ```sh
+   chesser download 2022-01                # one month
+   chesser download --latest 3             # newest 3 months
+   chesser download --budget 200           # newest months fitting in 200 GB
+   ```
+
+4. Optional, once per index: `chesser compress` (3.5× smaller, small searches ~2× faster).
+
+5. Use it: `chesser convert photo.jpg --boards 16 --games`.
+
+| step | one month (2022) |
+| --- | --- |
+| download | 33 GB, ~70 min at 8 MB/s |
+| index | 66 GB, ~12 min |
+| `compress` | 12 GB, ~5 min |
+
+Older months are much smaller (2013: 50–300 MB each, indexed in seconds). More months mean more real positions to choose from, with diminishing returns.
+
+Your own PGN files work too: `chesser index games.pgn.zst`. Add `--delete-pgn` to `download` to drop each PGN once indexed.
+
 ## Usage
 
 ```sh
