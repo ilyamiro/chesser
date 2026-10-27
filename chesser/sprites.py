@@ -1,107 +1,26 @@
-"""Scalable multi-tone piece sprites, colour themes and tile building.
+"""Piece sprites, colour themes and piece layers.
 
-Each piece is defined once as vector shapes in a unit square (x right, y down).
-`sprite(piece_type, n)` rasterizes it at any size n into a tone map:
+`sprite(piece_type, color, n)` gives a piece at square size n as a tone map:
 
     0 transparent  1 outline  2 fill  3 shadow  4 highlight  5 detail
 
-* the silhouette is drawn supersampled and thresholded on coverage;
-* the outline is the silhouette's outer ring, about n/12 pixels thick;
-* light comes from the top left: interior pixels next to the right/bottom edge
-  become shadow, those next to the top/left edge highlight (from n >= 12, where
-  there is room for a lit side without eating the fill);
-* detail shapes (the bishop's slit, the knight's eye, the king's cross...) are
-  drawn in their own tone inside the silhouette.
-
-Below 12 pixels no rasterizer makes readable pieces, so (like hinted pixel
-fonts) small sizes use the hand-drawn 8x8 masters in PIXEL_8, scaled.
+From 10 pixels up it is the Lichess cburnett set (Colin M.L. Burnett, GPLv2+,
+pieces/cburnett/) rasterized from SVG, with a guaranteed outline ring. Smaller
+squares use hand-drawn 8x8 masters, like hinted pixel fonts, since no
+rasterizer keeps pieces readable that small.
 """
 
+import io
 from functools import lru_cache
+from pathlib import Path
 
 import chess
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 TRANSPARENT, OUTLINE, FILL, SHADOW, HIGHLIGHT, DETAIL = range(6)
 
-# Shapes: (kind, params, add). kind: "poly" [(x, y), ...], "ellipse" (cx, cy, rx, ry),
-# "rect" (x0, y0, x1, y1), "line" (x0, y0, x1, y1, width). add=False cuts the shape out.
-_BASE = ("rect", (0.16, 0.80, 0.84, 0.94), True)
-
-SHAPES = {
-    chess.PAWN: {
-        "body": [
-            ("ellipse", (0.50, 0.30, 0.15, 0.15), True),
-            ("poly", [(0.40, 0.40), (0.60, 0.40), (0.70, 0.80), (0.30, 0.80)], True),
-            ("rect", (0.22, 0.74, 0.78, 0.94), True),
-        ],
-        "detail": [],
-    },
-    chess.KNIGHT: {
-        "body": [
-            ("poly", [(0.24, 0.94), (0.84, 0.94), (0.82, 0.58), (0.74, 0.30), (0.60, 0.15),
-                      (0.52, 0.04), (0.44, 0.16), (0.30, 0.26), (0.12, 0.50), (0.18, 0.62),
-                      (0.30, 0.60), (0.46, 0.50), (0.32, 0.80), (0.24, 0.82)], True),
-        ],
-        "detail": [
-            ("ellipse", (0.44, 0.30, 0.07, 0.07), True),       # eye
-            ("line", (0.64, 0.22, 0.76, 0.62, 0.07), True),     # mane
-        ],
-    },
-    chess.BISHOP: {
-        "body": [
-            ("ellipse", (0.50, 0.10, 0.08, 0.08), True),
-            ("ellipse", (0.50, 0.44, 0.22, 0.28), True),
-            ("rect", (0.32, 0.66, 0.68, 0.80), True),
-            _BASE,
-        ],
-        "detail": [
-            ("line", (0.60, 0.28, 0.44, 0.50, 0.09), True),     # mitre slit
-            ("rect", (0.30, 0.74, 0.70, 0.80), True),           # collar
-        ],
-    },
-    chess.ROOK: {
-        "body": [
-            ("rect", (0.18, 0.12, 0.82, 0.38), True),
-            ("rect", (0.34, 0.12, 0.44, 0.24), False),          # crenels
-            ("rect", (0.56, 0.12, 0.66, 0.24), False),
-            ("rect", (0.28, 0.36, 0.72, 0.82), True),
-            _BASE,
-        ],
-        "detail": [
-            ("rect", (0.28, 0.38, 0.72, 0.44), True),           # rim under the battlements
-        ],
-    },
-    chess.QUEEN: {
-        "body": [
-            ("poly", [(0.10, 0.20), (0.32, 0.50), (0.36, 0.12), (0.50, 0.44), (0.64, 0.12),
-                      (0.68, 0.50), (0.90, 0.20), (0.78, 0.80), (0.22, 0.80)], True),
-            ("ellipse", (0.10, 0.18, 0.07, 0.07), True),
-            ("ellipse", (0.36, 0.10, 0.07, 0.07), True),
-            ("ellipse", (0.64, 0.10, 0.07, 0.07), True),
-            ("ellipse", (0.90, 0.18, 0.07, 0.07), True),
-            _BASE,
-        ],
-        "detail": [
-            ("rect", (0.22, 0.66, 0.78, 0.73), True),           # crown band
-        ],
-    },
-    chess.KING: {
-        "body": [
-            ("rect", (0.44, 0.02, 0.56, 0.30), True),           # cross
-            ("rect", (0.34, 0.08, 0.66, 0.19), True),
-            ("ellipse", (0.50, 0.46, 0.34, 0.20), True),
-            ("poly", [(0.18, 0.46), (0.82, 0.46), (0.72, 0.80), (0.28, 0.80)], True),
-            _BASE,
-        ],
-        "detail": [
-            ("rect", (0.47, 0.04, 0.53, 0.28), True),
-            ("rect", (0.37, 0.11, 0.63, 0.16), True),
-            ("rect", (0.26, 0.66, 0.74, 0.72), True),           # girdle
-        ],
-    },
-}
+SVG_MIN_SIZE = 10
 
 # Hand-drawn 8x8 masters: '.' transparent, 'o' outline, '#' fill, 's' shadow, 'd' detail.
 PIXEL_8 = {
@@ -114,67 +33,53 @@ PIXEL_8 = {
 }
 _PIXEL_TONES = {".": TRANSPARENT, "o": OUTLINE, "#": FILL, "s": SHADOW, "d": DETAIL}
 
-SUPERSAMPLE = 8
-
-
-def _coverage(shapes, n):
-    s = n * SUPERSAMPLE
-    img = Image.new("L", (s, s), 0)
-    draw = ImageDraw.Draw(img)
-    for kind, p, add in shapes:
-        val = 255 if add else 0
-        if kind == "poly":
-            draw.polygon([(x * s, y * s) for x, y in p], fill=val)
-        elif kind == "ellipse":
-            cx, cy, rx, ry = p
-            draw.ellipse([(cx - rx) * s, (cy - ry) * s, (cx + rx) * s, (cy + ry) * s], fill=val)
-        elif kind == "rect":
-            x0, y0, x1, y1 = p
-            draw.rectangle([x0 * s, y0 * s, x1 * s - 1, y1 * s - 1], fill=val)
-        elif kind == "line":
-            x0, y0, x1, y1, w = p
-            draw.line([(x0 * s, y0 * s), (x1 * s, y1 * s)], fill=val, width=max(1, round(w * s)))
-    a = np.asarray(img, dtype=np.float64) / 255
-    return a.reshape(n, SUPERSAMPLE, n, SUPERSAMPLE).mean((1, 3))
-
-
 def _erode(mask):
     """4-neighbour erosion; pixels outside the canvas count as empty."""
     p = np.pad(mask, 1)
     return mask & p[:-2, 1:-1] & p[2:, 1:-1] & p[1:-1, :-2] & p[1:-1, 2:]
 
 
+PIECE_DIR = Path(__file__).parent / "pieces" / "cburnett"
+_LETTER = {chess.PAWN: "P", chess.KNIGHT: "N", chess.BISHOP: "B", chess.ROOK: "R", chess.QUEEN: "Q", chess.KING: "K"}
+
+
 @lru_cache(maxsize=None)
-def sprite(piece_type, n):
-    """Tone map (n, n) of uint8 for a piece at square size n."""
-    if n < 12:
-        master = np.array([[_PIXEL_TONES[c] for c in row] for row in PIXEL_8[piece_type]], dtype=np.uint8)
-        idx = np.arange(n) * 8 // n
-        return master[np.ix_(idx, idx)]
-    spec = SHAPES[piece_type]
-    body = _coverage(spec["body"], n) >= 0.5
+def svg_sprite(piece_type, color, n):
+    """Tone map (n, n) of the Lichess cburnett piece, rasterized at size n.
+
+    Rendered supersampled; a pixel belongs to the piece when it is at least 40%
+    covered. The silhouette always gets a dark outline ring (Lichess's own stroke
+    is thinner than a pixel at small sizes). Inside, white pieces keep their dark
+    lines as outline colour, black pieces their light lines as detail.
+    """
+    import cairosvg
+
+    ss = 4
+    name = ("w" if color == chess.WHITE else "b") + _LETTER[piece_type] + ".svg"
+    png = cairosvg.svg2png(url=str(PIECE_DIR / name), output_width=n * ss, output_height=n * ss)
+    rgba = np.asarray(Image.open(io.BytesIO(png)).convert("RGBA"), dtype=np.float64) / 255
+    alpha = rgba[..., 3].reshape(n, ss, n, ss).mean((1, 3))
+    lum = (luminance(rgba[..., :3]) * rgba[..., 3]).reshape(n, ss, n, ss).mean((1, 3)) / np.maximum(alpha, 1e-9)
+    body = alpha >= 0.4
     inner = body
-    for _ in range(max(1, round(n / 12))):
+    for _ in range(max(1, round(n / 24))):  # Lichess's stroke vanishes at small sizes: draw our own ring
         inner = _erode(inner)
     tones = np.where(body, OUTLINE, TRANSPARENT).astype(np.uint8)
-    tones[inner] = FILL
-
-    t = max(1, round(n / 10))
-    p = np.pad(inner, t)
-    right_edge = np.zeros_like(inner)
-    left_edge = np.zeros_like(inner)
-    for d in range(1, t + 1):
-        right_edge |= ~p[t:-t or None, t + d:p.shape[1] - t + d] | ~p[t + d:p.shape[0] - t + d, t:-t or None]
-        left_edge |= ~p[t:-t or None, t - d:p.shape[1] - t - d] | ~p[t - d:p.shape[0] - t - d, t:-t or None]
-    # Only shade pixels that have fill on the other side, so thin parts stay solid.
-    tones[inner & right_edge & ~left_edge] = SHADOW
-    if n >= 12:
-        tones[inner & left_edge & ~right_edge] = HIGHLIGHT
-
-    if spec["detail"]:
-        detail = _coverage(spec["detail"], n) >= 0.5
-        tones[detail & inner] = DETAIL
+    if color == chess.WHITE:
+        tones[inner] = np.where(lum[inner] >= 0.5, FILL, OUTLINE)
+    else:
+        tones[inner] = np.where(lum[inner] < 0.5, FILL, DETAIL)
     return tones
+
+
+@lru_cache(maxsize=None)
+def sprite(piece_type, color, n):
+    """Tone map (n, n) of uint8 for a piece at square size n."""
+    if n >= SVG_MIN_SIZE:
+        return svg_sprite(piece_type, color, n)
+    master = np.array([[_PIXEL_TONES[c] for c in row] for row in PIXEL_8[piece_type]], dtype=np.uint8)
+    idx = np.arange(n) * 8 // n
+    return master[np.ix_(idx, idx)]
 
 
 # Each theme: light square, dark square, white piece base, black piece base.
@@ -247,7 +152,7 @@ def piece_layers(theme, n, piece_shades, white_band, black_band):
     fills = {chess.WHITE: np.linspace(*white_band, piece_shades), chess.BLACK: np.linspace(*black_band, piece_shades)}
     for opt in range(1, NUM_OPTIONS):
         piece = option_piece(opt)
-        tm = sprite(piece.piece_type, n)
+        tm = sprite(piece.piece_type, piece.color, n)
         mask[opt] = tm != TRANSPARENT
         pbase = t["white"] if piece.color == chess.WHITE else t["black"]
         for ps in range(piece_shades):

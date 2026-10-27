@@ -10,7 +10,7 @@ readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["numpy", "pillow", "chess"]
+dependencies = ["numpy", "pillow", "chess", "cairosvg"]
 
 [project.scripts]
 chesser = "chesser.__main__:main"
@@ -19,4 +19,4 @@ chesser = "chesser.__main__:main"
 packages = ["chesser"]
 
 [tool.setuptools.package-data]
-chesser = ["match.c"]
+chesser = ["match.c", "pieces/cburnett/*.svg"]
