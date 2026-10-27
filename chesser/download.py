@@ -30,7 +30,7 @@ def available():
         return sorted(set(re.findall(r"rated_(\d{4}-\d{2})\.pgn\.zst", r.read().decode())))
 
 
-def remote_size(month, attempts=6):
+def remote_size(month, attempts=8):
     """Size in bytes, retrying with backoff when Lichess rate-limits (HTTP 429)."""
     req = urllib.request.Request(BASE + filename(month), method="HEAD")
     for attempt in range(attempts):
@@ -44,8 +44,8 @@ def remote_size(month, attempts=6):
 
 
 def remote_sizes(months):
-    # Few parallel requests: the server rate-limits bursts.
-    with ThreadPoolExecutor(3) as pool:
+    # One request at a time: the server rate-limits bursts.
+    with ThreadPoolExecutor(1) as pool:
         return dict(zip(months, pool.map(remote_size, months)))
 
 
@@ -54,11 +54,23 @@ def checksums():
         return {name: digest for digest, name in (line.split() for line in r.read().decode().splitlines() if line)}
 
 
+def progress_bar(frac, width=28):
+    n = int(frac * width)
+    return f"[{'#' * n}{'-' * (width - n)}] {frac * 100:3.0f}%"
+
+
 def sha256(path):
     h = hashlib.sha256()
+    total = max(path.stat().st_size, 1)
+    done, last = 0, 0.0
     with open(path, "rb") as f:
         while block := f.read(16 * CHUNK):
             h.update(block)
+            done += len(block)
+            if time.time() - last > 0.5:
+                print(f"\r{progress_bar(done / total)} checking", end="", file=sys.stderr, flush=True)
+                last = time.time()
+    print(f"\r{progress_bar(1)} checked   ", file=sys.stderr)
     return h.hexdigest()
 
 
@@ -91,11 +103,11 @@ def fetch(month, dest_dir, expected_size, log=print):
             f.write(block)
             done += len(block)
             now = time.time()
-            if now - last > 2 or done == expected_size:
+            if now - last > 0.5 or done == expected_size:
                 speed = (done - have) / max(now - started, 1e-9)
                 eta = (expected_size - done) / max(speed, 1)
-                print(f"\r{month}: {fmt_size(done)} / {fmt_size(expected_size)}  {fmt_size(speed)}/s  "
-                      f"eta {eta / 60:.0f} min   ", end="", file=sys.stderr, flush=True)
+                print(f"\r{month} {progress_bar(done / expected_size)}  {fmt_size(done)} / {fmt_size(expected_size)}  "
+                      f"{fmt_size(speed)}/s  eta {eta / 60:.0f} min   ", end="", file=sys.stderr, flush=True)
                 last = now
     print(file=sys.stderr)
     if path.stat().st_size != expected_size:

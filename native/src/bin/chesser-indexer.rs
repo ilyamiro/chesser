@@ -16,9 +16,13 @@ use std::{
     env,
     fs::{self, File},
     hash::{BuildHasherDefault, Hasher},
-    io::{self, BufWriter, Write},
+    io::{self, BufWriter, IsTerminal, Read, Write},
     ops::ControlFlow,
     path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc,
+    },
     thread,
     time::Instant,
 };
@@ -296,6 +300,42 @@ impl ShardWriter {
     }
 }
 
+/// Counts the bytes read from the (compressed) input, to show progress.
+struct Counting<R> {
+    inner: R,
+    bytes: Arc<AtomicU64>,
+}
+
+impl<R: Read> Read for Counting<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes.fetch_add(n as u64, Relaxed);
+        Ok(n)
+    }
+}
+
+/// `[#########-------] 56%  24M games  148k games/s  eta 7 min`, redrawn in place on a terminal.
+fn show_progress(frac: f64, games: u64, started: Instant, last: bool) {
+    const WIDTH: usize = 28;
+    let secs = started.elapsed().as_secs_f64().max(1e-9);
+    let filled = (frac * WIDTH as f64) as usize;
+    let eta = if frac > 0.0 { secs * (1.0 - frac) / frac / 60.0 } else { 0.0 };
+    let line = format!(
+        "[{}{}] {:3.0}%  {:.1}M games  {:.0}k games/s  eta {:.0} min",
+        "#".repeat(filled),
+        "-".repeat(WIDTH - filled),
+        frac * 100.0,
+        games as f64 / 1e6,
+        games as f64 / secs / 1e3,
+        eta
+    );
+    if io::stderr().is_terminal() {
+        eprint!("\r{line}   {}", if last { "\n" } else { "" });
+    } else {
+        eprintln!("{line}");
+    }
+}
+
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
@@ -321,11 +361,17 @@ fn main() -> io::Result<()> {
     }
 
     let file = File::open(&input)?;
+    let total_bytes = file.metadata()?.len().max(1);
+    let consumed = Arc::new(AtomicU64::new(0));
+    let file = Counting { inner: file, bytes: consumed.clone() };
     let reader: Box<dyn io::Read + Send> = if input.ends_with(".zst") {
         Box::new(zstd::Decoder::new(file)?)
     } else {
         Box::new(file)
     };
+    let tty = io::stderr().is_terminal();
+    let mut next_report = Instant::now();
+    let mut last_pct = 0u64;
 
     let started = Instant::now();
     let (work_tx, work_rx) = crossbeam_channel::bounded::<(u64, Vec<Game>)>(64);
@@ -377,9 +423,15 @@ fn main() -> io::Result<()> {
                 }
             }
             games_read += 1;
-            if games_read % 1_000_000 == 0 {
-                let secs = started.elapsed().as_secs_f64();
-                eprintln!("  {}M games read, {:.0} games/s", games_read / 1_000_000, games_read as f64 / secs);
+            if games_read % 4096 == 0 {
+                let frac = (consumed.load(Relaxed) as f64 / total_bytes as f64).min(1.0);
+                // On a terminal redraw every half second; otherwise print every 5 %.
+                let due = if tty { Instant::now() >= next_report } else { frac * 20.0 >= (last_pct + 1) as f64 };
+                if due {
+                    show_progress(frac, games_read, started, false);
+                    next_report = Instant::now() + std::time::Duration::from_millis(500);
+                    last_pct = (frac * 20.0) as u64;
+                }
             }
         }
         if !batch.is_empty() {
@@ -389,6 +441,7 @@ fn main() -> io::Result<()> {
         write_handle.join().unwrap()
     })?;
 
+    show_progress(1.0, games_read, started, true);
     let games = writer.games_written;
     let dups = writer.duplicates;
     let positions = writer.finish(&out_dir, &input, params, games_read)?;

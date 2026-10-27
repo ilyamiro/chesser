@@ -1,6 +1,6 @@
 """Index of positions from real games, and matching them against image regions.
 
-Shards are built by the Rust indexer (indexer/, one shard per PGN file) and
+Shards are built by the Rust indexer (native/, one shard per PGN file) and
 memory-mapped here, so the index can be far larger than RAM. Search runs the
 AVX2 kernel in match.c over every shard, keeping the best candidates per
 region by quantized score; those candidates are then rescored exactly.
@@ -20,7 +20,7 @@ from .config import cache_dir
 from .sprites import NUM_OPTIONS
 
 HERE = Path(__file__).parent
-REPO_INDEXER = HERE.parent / "indexer"
+NATIVE = HERE.parent / "native"
 
 
 def _load_kernel():
@@ -35,23 +35,23 @@ def _load_kernel():
     return so
 
 
-def indexer():
-    """$CHESSER_INDEXER, a chesser-indexer on PATH, or a release build of the repo's indexer/."""
-    found = os.environ.get("CHESSER_INDEXER") or shutil.which("chesser-indexer")
+def native_binary(name):
+    """A native tool: $CHESSER_<NAME>, on PATH, or a release build of the repo's native/ crate."""
+    found = os.environ.get("CHESSER_" + name.removeprefix("chesser-").upper()) or shutil.which(name)
     if found:
         return found
-    built = REPO_INDEXER / "target" / "release" / "chesser-indexer"
+    built = NATIVE / "target" / "release" / name
     if not built.exists():
-        if not (REPO_INDEXER / "Cargo.toml").exists():
-            raise FileNotFoundError("chesser-indexer not found: run `cargo install --path indexer` from the repository")
-        subprocess.run(["cargo", "build", "--release"], cwd=REPO_INDEXER, check=True,
+        if not (NATIVE / "Cargo.toml").exists():
+            raise FileNotFoundError(f"{name} not found: run `cargo install --path native` from the repository")
+        subprocess.run(["cargo", "build", "--release"], cwd=NATIVE, check=True,
                        env={**os.environ, "RUSTFLAGS": "-C target-cpu=native"})
     return str(built)
 
 
 def build_shard(pgn, out_dir, min_ply=8, stride=4, threads=None):
     """Run the Rust indexer on one PGN file."""
-    cmd = [indexer(), str(pgn), str(out_dir), "--min-ply", str(min_ply), "--stride", str(stride)]
+    cmd = [native_binary("chesser-indexer"), str(pgn), str(out_dir), "--min-ply", str(min_ply), "--stride", str(stride)]
     if threads:
         cmd += ["--threads", str(threads)]
     subprocess.run(cmd, check=True)

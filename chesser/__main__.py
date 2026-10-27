@@ -9,7 +9,7 @@ import time
 import chess
 import numpy as np
 
-from . import download, engine, legality
+from . import download, engine, legality, played
 from .config import data_dir
 from .games import GameIndex, build_shard
 from .sprites import THEMES
@@ -28,12 +28,20 @@ def prepare(path, palette, a):
     cost, choice, light = engine.square_costs(target, palette, a.smooth, a.smooth_radius)
     coords = [(br, bc) for br in range(boards_high) for bc in range(a.boards)]
     board_px = 8 * a.square_size
-    results = engine.synthesize_all(cost, boards_high, a.boards, a.iters, a.seed, a.workers, a.max_promotions)
     entries = []
-    for (br, bc), (opts, err) in zip(coords, results):
-        board = engine.opts_to_board(opts)
-        entries.append({"row": br, "col": bc, "source": "synthetic", "opts": opts, "turn": board.turn,
-                        "synthetic_error": err, "error": err})
+    if a.generate == "played":
+        tables = np.stack([engine.board_cost(cost, br, bc) for br, bc in coords])
+        results = played.synthesize(tables, a.beam, a.max_plies, a.min_plies, a.plausibility,
+                                    a.max_promotions, a.seed, a.workers)
+        for (br, bc), (opts, err, board, san) in zip(coords, results):
+            entries.append({"row": br, "col": bc, "source": "played", "opts": opts, "turn": board.turn,
+                            "synthetic_error": err, "error": err, "moves": played.pgn_moves(san)})
+    else:
+        results = engine.synthesize_all(cost, boards_high, a.boards, a.iters, a.seed, a.workers, a.max_promotions)
+        for (br, bc), (opts, err) in zip(coords, results):
+            board = engine.opts_to_board(opts)
+            entries.append({"row": br, "col": bc, "source": "synthetic", "opts": opts, "turn": board.turn,
+                            "synthetic_error": err, "error": err})
     print(f"{path}: {a.boards}x{boards_high} boards ({a.boards * board_px}x{boards_high * board_px} px), "
           f"{cropped:.1%} cropped, synthesized in {time.time() - t0:.1f}s")
     return {"path": path, "boards_high": boards_high, "cost": cost, "choice": choice, "light": light,
@@ -60,6 +68,7 @@ def assign_games(img, matches, index, a):
             used.add(codes.tobytes())
             entries[r].update(source="game", opts=codes.tolist(), turn=shard.turn(slot),
                               error=err, game=shard.info(slot))
+            entries[r].pop("moves", None)
             break
     print(f"{img['path']}: best game fit per board median {np.median(best_fit):.3f}, max {best_fit.max():.3f}; "
           f"{len(used)}/{len(entries)} boards from real games (threshold {a.threshold})")
@@ -83,6 +92,8 @@ def write(img, palette, a):
         engine.place_board(grid, e["row"], e["col"], e["opts"])
         rec = {"row": e["row"], "col": e["col"], "fen": board.fen(), "source": e["source"],
                "rmse": round(float(np.sqrt(e["error"] / 64)), 2)}
+        if "moves" in e:
+            rec["moves"] = e["moves"]
         if e["source"] == "game":
             rec["fit"] = round(float((e["synthetic_error"] + 64 * a.fit_floor) / (e["error"] + 64 * a.fit_floor)), 3)
             rec["game"] = e["game"]
@@ -189,6 +200,13 @@ def cmd_verify(a):
     bad = 0
     for b in boards:
         reasons = legality.problems(chess.Board(b["fen"]))
+        if "moves" in b:  # played boards: the game must really reach the position
+            game = chess.Board()
+            for token in b["moves"].split():
+                if not token.endswith("."):
+                    game.push_san(token)
+            if game.board_fen() != chess.Board(b["fen"]).board_fen():
+                reasons.append("move list does not reach the position")
         if reasons:
             bad += 1
             print(f"board {b['row']},{b['col']} {b['fen']}: {'; '.join(reasons)}")
@@ -222,8 +240,15 @@ def main():
     c.add_argument("--smooth", type=float, default=0.5,
                    help="pull of each square's base shade toward the locally smoothed photo (0 = off)")
     c.add_argument("--smooth-radius", type=float, default=1.5, help="smoothing radius in squares (within a board)")
+    c.add_argument("--generate", choices=("free", "played"), default="free",
+                   help="free: pieces placed directly; played: every board reached by a real move sequence")
+    c.add_argument("--beam", type=int, default=256, help="played: lines kept per half-move")
+    c.add_argument("--max-plies", type=int, default=120, help="played: longest game, in half-moves")
+    c.add_argument("--min-plies", type=int, default=20, help="played: shortest game, in half-moves")
+    c.add_argument("--plausibility", type=int, choices=(0, 1, 2), default=2,
+                   help="played: 0 legal only, 1 no mate in one ever available, 2 also no piece can be won outright")
     c.add_argument("--max-promotions", type=int, default=1,
-                   help="synthetic boards: max pieces per side beyond the starting set (0 = normal armies only)")
+                   help="generated boards: max pieces per side beyond the starting set (0 = normal armies only)")
     c.add_argument("--iters", type=int, default=4000, help="annealing steps per board")
     c.add_argument("--scale", type=int, default=1, help="nearest-neighbour upscale of the output")
     c.add_argument("--grid", type=int, default=2, help="separator line width between boards in output pixels (0 = none)")

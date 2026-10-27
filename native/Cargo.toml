@@ -1,13 +1,14 @@
 [package]
-name = "chesser-indexer"
+name = "chesser-native"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-description = "Builds chesser game-position index shards from Lichess PGN files"
+description = "Native tools for chesser: Lichess PGN indexer and image-steered game player"
 
 [dependencies]
 crossbeam-channel = "0.5.17"
 pgn-reader = "0.29.1"
+rayon = "1.12.0"
 shakmaty = "0.30.2"
 zstd = "0.14.3"
 
