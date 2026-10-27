@@ -12,6 +12,21 @@ Turns an image into a grid of chessboards. Every board is a legal chess position
 chesser convert examples/mountain.jpg --boards 12 --square-size 16 --games --threshold 0.9 -o docs/demo.png
 ```
 
+## Example
+
+Real games only: all 336 boards are positions from Lichess games (2013-01 to 2013-12, 2022-01).
+
+| original | chesser |
+| --- | --- |
+| ![original](docs/forest.jpg) | ![chesser](docs/forest-chess.png) |
+
+```sh
+chesser convert forest.jpg --boards 24 --square-size 16 --games --threshold 0 --candidates 256 \
+  --shades 24 --light-band 100,250 --dark-band 5,130 --spread 20 --min-contrast 20
+```
+
+`--threshold 0` accepts the best real position for every board (median fit 0.82). The default 0.9 mixes in generated boards where no real game fits well enough.
+
 ## Requirements
 
 - Python ≥ 3.10, a C compiler with OpenMP, an AVX2 CPU (libzstd optional, for `compress`)
