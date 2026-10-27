@@ -2,17 +2,27 @@
 
 Turns an image into a grid of chessboards. Every board is a legal chess position, either generated or taken from a real Lichess game.
 
+## Demo
+
+![demo](docs/demo.png)
+
+![close-up](docs/demo-closeup.png)
+
+```sh
+chesser convert examples/mountain.jpg --boards 12 --square-size 16 --games --threshold 0.9 -o docs/demo.png
+```
+
 ## Requirements
 
 - Python ≥ 3.10, a C compiler with OpenMP, an AVX2 CPU
-- Rust (cargo) for the game indexer
+- Rust (cargo) for the native tools (indexer, move search)
 - NixOS: `nix-shell` provides all of it
 
 ## Install
 
 ```sh
 pip install .
-cargo install --path indexer
+cargo install --path native   # chesser-indexer, chesser-play
 ```
 
 ## Usage
@@ -49,6 +59,11 @@ Data goes to `$CHESSER_DATA`, else `./data`, else `~/.local/share/chesser`.
 | `--smooth` | 0.5 | pull of square shades toward the smoothed image |
 | `--smooth-radius` | 1.5 | smoothing radius, in squares |
 | `--min-contrast` | 30 | min piece vs. square brightness difference |
+| `--generate` | free | `free`, or `played` (reached by a real move sequence) |
+| `--beam` | 256 | played: lines kept per half-move |
+| `--max-plies` | 120 | played: max game length |
+| `--min-plies` | 20 | played: min game length |
+| `--plausibility` | 2 | played: 0 legal, 1 no mate in one available, 2 no piece won outright |
 | `--max-promotions` | 1 | extra pieces per side beyond a normal army |
 | `--iters` | 4000 | search steps per board |
 | `--games [DIR]` | off | use real game positions |
@@ -99,8 +114,17 @@ Data goes to `$CHESSER_DATA`, else `./data`, else `~/.local/share/chesser`.
 
 ## Sizes
 
-A 2022 Lichess month: ~33 GB download, ~90M games, ~63 GB index, about a minute of search per image.
+Measured on Lichess January 2022 (`--stride 4`, `--min-ply 8`):
+
+| | |
+| --- | --- |
+| download | 33.2 GB |
+| games | 102.1M read, 99.3M kept |
+| positions | 1.34B |
+| index | 66 GB |
+| indexing time | 11.6 min (16 threads) |
+| search, 176 boards | ~75 s |
 
 ## License
 
-AGPL-3.0-or-later. Example photo: Vyacheslav Argenberg, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0).
+AGPL-3.0-or-later. Pieces: cburnett set by Colin M.L. Burnett via Lichess, [GPLv2+](https://www.gnu.org/licenses/gpl-2.0.txt). Example photo: Vyacheslav Argenberg, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0).
