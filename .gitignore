@@ -1,0 +1,8 @@
+# Game data lives on the external SSD (data -> /run/media/.../chesser-data)
+/data
+# Build outputs
+/indexer/target/
+/chesser/_match.so
+__pycache__/
+# Generated conversions
+/examples/*-chess*

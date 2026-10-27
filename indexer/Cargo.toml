@@ -1,0 +1,16 @@
+[package]
+name = "chesser-indexer"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Builds chesser game-position index shards from Lichess PGN files"
+
+[dependencies]
+crossbeam-channel = "0.5.17"
+pgn-reader = "0.29.1"
+shakmaty = "0.30.2"
+zstd = "0.14.3"
+
+[profile.release]
+lto = true
+codegen-units = 1
