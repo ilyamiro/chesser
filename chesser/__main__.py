@@ -5,13 +5,14 @@ import json
 import os
 import shutil
 import time
+from pathlib import Path
 
 import chess
 import numpy as np
 
 from . import download, engine, legality, played
 from .config import data_dir
-from .games import GameIndex, build_shard
+from .games import GameIndex, build_shard, compress_shard
 from .sprites import THEMES
 
 
@@ -140,6 +141,13 @@ def cmd_index(a):
     for pgn in a.pgn:
         name = os.path.basename(pgn).split(".")[0].removeprefix("lichess_db_standard_rated_")
         build_shard(pgn, os.path.join(out, name), a.min_ply, a.stride, a.threads)
+
+
+def cmd_compress(a):
+    root = Path(a.shards or data_dir() / "index")
+    dirs = [root] if (root / "meta.json").exists() else sorted(p.parent for p in root.glob("*/meta.json"))
+    for d in dirs:
+        compress_shard(d, a.level)
 
 
 def cmd_download(a):
@@ -290,6 +298,11 @@ def main():
     i.add_argument("--stride", type=int, default=4, help="keep every Nth position of each game")
     i.add_argument("--threads", type=int)
     i.set_defaults(func=cmd_index)
+
+    z = sub.add_parser("compress", help="store index blocks as zstd (lossless; reads 3-4x less from disk)")
+    z.add_argument("shards", nargs="?", type=Path, help="a shard or a directory of shards (default: <data>/index)")
+    z.add_argument("--level", type=int, default=9, help="zstd level")
+    z.set_defaults(func=cmd_compress)
 
     v = sub.add_parser("verify", help="re-check every FEN in a convert output")
     v.add_argument("json")

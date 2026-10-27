@@ -7,10 +7,12 @@ region by quantized score; those candidates are then rescored exactly.
 """
 
 import ctypes
+import functools
 import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import chess
@@ -23,15 +25,24 @@ HERE = Path(__file__).parent
 NATIVE = HERE.parent / "native"
 
 
+@functools.cache
 def _load_kernel():
+    """Compile (when match.c changed) and load the search kernel; zstd support needs libzstd."""
     src, lib = HERE / "match.c", cache_dir() / "_match.so"
     if not lib.exists() or lib.stat().st_mtime < src.stat().st_mtime:
-        subprocess.run(["cc", "-O3", "-mavx2", "-fopenmp", "-shared", "-fPIC",
-                        str(src), "-o", str(lib)], check=True)
+        cmd = ["cc", "-O3", "-mavx2", "-fopenmp", "-shared", "-fPIC", str(src), "-o", str(lib)]
+        if subprocess.run(cmd + ["-DHAVE_ZSTD", "-lzstd"], capture_output=True).returncode:
+            subprocess.run(cmd, check=True)  # no libzstd: compressed shards stay unreadable
     so = ctypes.CDLL(str(lib))
-    so.top_matches.restype = ctypes.c_int
-    so.top_matches.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int64, ctypes.c_void_p,
-                               ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+    p, i64, i32 = ctypes.c_void_p, ctypes.c_int64, ctypes.c_int
+    so.top_matches.restype = i32
+    so.top_matches.argtypes = [p, p, p, i64, i64, p, i32, i32, i32, p, p, p]
+    so.decode_unit.restype = i32
+    so.decode_unit.argtypes = [p, p, i64, i64, p]
+    so.unit_bound.restype = i64
+    so.unit_bound.argtypes = []
+    so.compress_units.restype = i32
+    so.compress_units.argtypes = [p, i64, i32, i64, i64, p, i64, p]
     return so
 
 
@@ -71,13 +82,70 @@ def quantize(tables):
     return q
 
 
+UNIT = 256  # blocks per compressed unit (must match match.c)
+
+
+def unpack(packed):
+    """(n, 32) packed bytes -> (n, 64) option codes."""
+    out = np.empty((len(packed), 64), dtype=np.uint8)
+    out[:, 0::2] = packed & 15
+    out[:, 1::2] = packed >> 4
+    return out
+
+
+def compress_shard(path, level=9, log=print):
+    """Store a shard's blocks as zstd units (lossless, every unit re-read and compared), then drop blocks.bin."""
+    path = Path(path)
+    meta = json.loads((path / "meta.json").read_text())
+    if meta.get("compression"):
+        return
+    kernel = _load_kernel()
+    cap = kernel.unit_bound()
+    if cap < 0:
+        log(f"{path.name}: libzstd not found, leaving blocks uncompressed")
+        return
+    nb = meta["blocks"]
+    src = np.memmap(path / "blocks.bin", dtype=np.uint8, mode="r", shape=(nb, 1024))
+    nunits = -(-nb // UNIT)
+    sizes_all, batch = [], 512
+    with open(path / "blocks.zst.tmp", "wb") as f:
+        for u0 in range(0, nunits, batch):
+            nu = min(batch, nunits - u0)
+            sizes = np.empty(nu, dtype=np.int64)
+            dst = np.empty(nu * cap, dtype=np.uint8)
+            if kernel.compress_units(src.ctypes.data, nb, level, u0, nu, dst.ctypes.data, cap, sizes.ctypes.data):
+                raise IOError(f"{path}: compression check failed")
+            for i in range(nu):
+                f.write(dst[i * cap:i * cap + sizes[i]].data)
+            sizes_all.append(sizes)
+            print(f"\r{path.name}: compressing {(u0 + nu) / nunits * 100:3.0f}%", end="", file=sys.stderr, flush=True)
+    print(file=sys.stderr)
+    offsets = np.concatenate([[0], np.cumsum(np.concatenate(sizes_all))]).astype(np.uint64)
+    offsets.tofile(path / "blocks.zidx")
+    os.replace(path / "blocks.zst.tmp", path / "blocks.zst")
+    meta["compression"] = "zstd"
+    (path / "meta.json.tmp").write_text(json.dumps(meta))
+    os.replace(path / "meta.json.tmp", path / "meta.json")
+    del src
+    (path / "blocks.bin").unlink()
+    log(f"{path.name}: blocks {nb * 1024 / 1e9:.1f} GB -> {offsets[-1] / 1e9:.1f} GB")
+
+
 class Shard:
     def __init__(self, path):
         self.path = Path(path)
         self.meta = json.loads((self.path / "meta.json").read_text())
-        nb = self.meta["blocks"]
+        nb = self.nblocks = self.meta["blocks"]
         self.n = self.meta["positions"]
-        self.blocks = np.memmap(self.path / "blocks.bin", dtype=np.uint8, mode="r", shape=(nb, 32, 32))
+        self.compressed = self.meta.get("compression") == "zstd"
+        if self.compressed:
+            if _load_kernel().unit_bound() < 0:
+                raise RuntimeError(f"{self.path}: compressed shard needs libzstd to build the search kernel")
+            self.blocks = None
+            self.zdata = np.memmap(self.path / "blocks.zst", dtype=np.uint8, mode="r")
+            self.zoff = np.fromfile(self.path / "blocks.zidx", dtype=np.uint64)
+        else:
+            self.blocks = np.memmap(self.path / "blocks.bin", dtype=np.uint8, mode="r", shape=(nb, 32, 32))
         self.game = np.memmap(self.path / "game.bin", dtype=np.uint32, mode="r")
         self.ply = np.memmap(self.path / "ply.bin", dtype=np.uint16, mode="r")
         self.offsets = np.memmap(self.path / "offsets.bin", dtype=np.uint64, mode="r")
@@ -85,11 +153,18 @@ class Shard:
     def codes(self, slots):
         """Option codes (len(slots), 64) for the given slot indices."""
         slots = np.asarray(slots)
-        packed = self.blocks[slots // 32, :, slots % 32]  # (n, 32)
-        out = np.empty((len(slots), 64), dtype=np.uint8)
-        out[:, 0::2] = packed & 15
-        out[:, 1::2] = packed >> 4
-        return out
+        if self.compressed:
+            unit = np.empty((UNIT, 32, 32), dtype=np.uint8)
+            packed = np.empty((len(slots), 32), dtype=np.uint8)
+            for u in np.unique(slots // 32 // UNIT):
+                if _load_kernel().decode_unit(self.zdata.ctypes.data, self.zoff.ctypes.data, self.nblocks,
+                                              int(u), unit.ctypes.data) < 0:
+                    raise IOError(f"{self.path}: corrupt compressed unit {u}")
+                pick = slots // 32 // UNIT == u
+                packed[pick] = unit[slots[pick] // 32 - u * UNIT, :, slots[pick] % 32]
+        else:
+            packed = self.blocks[slots // 32, :, slots % 32]  # (n, 32)
+        return unpack(packed)
 
     def info(self, slot):
         gid = int(self.game[slot])
@@ -134,15 +209,23 @@ class GameIndex:
         for si, shard in enumerate(self.shards):
             out_s = np.empty((R, k), dtype=np.uint16)
             out_i = np.empty((R, k), dtype=np.int64)
-            rc = self.kernel.top_matches(shard.blocks.ctypes.data, shard.meta["blocks"], shard.n,
-                                         q.ctypes.data, R, k, min_pieces, out_s.ctypes.data, out_i.ctypes.data)
+            out_p = np.empty((R, k, 32), dtype=np.uint8)
+            rc = self.kernel.top_matches(
+                None if shard.compressed else shard.blocks.ctypes.data,
+                shard.zdata.ctypes.data if shard.compressed else None,
+                shard.zoff.ctypes.data if shard.compressed else None,
+                shard.nblocks, shard.n, q.ctypes.data, R, k, min_pieces,
+                out_s.ctypes.data, out_i.ctypes.data, out_p.ctypes.data)
+            if rc == -2:
+                raise IOError(f"{shard.path}: corrupt or unreadable compressed blocks")
             if rc:
                 raise MemoryError("match kernel allocation failed")
             for r in range(R):
-                slots = out_i[r][out_i[r] >= 0]
+                keep = out_i[r] >= 0
+                slots = out_i[r][keep]
                 if len(slots) == 0:
                     continue
-                codes = shard.codes(slots).astype(np.int64)
+                codes = unpack(out_p[r][keep]).astype(np.int64)
                 exact = tables[r][np.arange(64), codes].sum(1)
                 cands[r].extend(zip(exact.tolist(), [(si, int(s)) for s in slots]))
         return [sorted(c)[:k] for c in cands]

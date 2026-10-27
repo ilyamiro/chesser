@@ -8,3 +8,5 @@ __pycache__/
 /examples/*-chess*
 /examples/*-generated*
 /.agents/
+/portrait-*
+/Pasted image*

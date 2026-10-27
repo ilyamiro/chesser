@@ -14,7 +14,7 @@ chesser convert examples/mountain.jpg --boards 12 --square-size 16 --games --thr
 
 ## Requirements
 
-- Python ≥ 3.10, a C compiler with OpenMP, an AVX2 CPU
+- Python ≥ 3.10, a C compiler with OpenMP, an AVX2 CPU (libzstd optional, for `compress`)
 - Rust (cargo) for the native tools (indexer, move search)
 - NixOS: `nix-shell` provides all of it
 
@@ -105,6 +105,15 @@ Data goes to `$CHESSER_DATA`, else `./data`, else `~/.local/share/chesser`.
 | `--min-ply` | 8 | skip the first N plies |
 | `--stride` | 4 | keep every Nth position per game |
 | `--threads` | auto | indexer threads |
+
+## `compress`
+
+Lossless zstd of index blocks (3.5× smaller, identical results, needs libzstd). Small searches get ~2× faster; large ones are compute-bound and not.
+
+| flag | default | |
+| --- | --- | --- |
+| `SHARDS` | `<data>/index` | a shard or a directory of shards |
+| `--level` | 9 | zstd level |
 
 ## `verify`
 
