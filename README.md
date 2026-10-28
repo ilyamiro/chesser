@@ -2,16 +2,6 @@
 
 Turns an image into a grid of chessboards. Every board is a legal chess position, either generated or taken from a real Lichess game.
 
-## Demo
-
-![demo](docs/demo.png)
-
-![close-up](docs/demo-closeup.png)
-
-```sh
-chesser convert examples/mountain.jpg --boards 12 --square-size 16 --games --threshold 0.9 -o docs/demo.png
-```
-
 ## Example
 
 Real games only: all 336 boards are positions from Lichess games (2013-01 to 2013-12, 2022-01).
@@ -26,6 +16,10 @@ chesser convert forest.jpg --boards 24 --square-size 16 --games --threshold 0 --
 ```
 
 `--threshold 0` accepts the best real position for every board (median fit 0.82). The default 0.9 mixes in generated boards where no real game fits well enough.
+
+Close-up of four boards from another image (nearest-neighbour ×2):
+
+![close-up](docs/demo-closeup.png)
 
 ## Requirements
 
