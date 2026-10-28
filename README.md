@@ -17,7 +17,7 @@ chesser convert forest.jpg --boards 24 --square-size 16 --games --threshold 0 --
 
 `--threshold 0` accepts the best real position for every board (median fit 0.82). The default 0.9 mixes in generated boards where no real game fits well enough.
 
-Close-up of four boards from another image (nearest-neighbour ×2):
+Close-up: four boards of the same forest at `--square-size 32` (generated positions):
 
 ![close-up](docs/demo-closeup.png)
 
